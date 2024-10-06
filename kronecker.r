@@ -1,7 +1,6 @@
 library(tidyverse)
 # also need `fs` and `cmdstanr` packages
 
-# stan_file = 'stan/test_lwr_tri_idx.stan'
 stan_file = 'stan/test_kronecker_accuracy.stan'
 stan_exe_dir = fs::path_ext_remove(stan_file) %>% str_replace('stan','stan_exes')
 fs::dir_create(stan_exe_dir)
