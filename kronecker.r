@@ -1,4 +1,5 @@
-source('~/_.Rprofile')
+library(tidyverse)
+# also need `fs` and `cmdstanr` packages
 
 # stan_file = 'stan/test_lwr_tri_idx.stan'
 stan_file = 'stan/test_kronecker_accuracy.stan'
@@ -8,7 +9,7 @@ mod = cmdstanr::cmdstan_model(
 	stan_file
 	, include_paths = 'stan/includes'
 	, dir = stan_exe_dir
-	# , force_recompile = TRUE
+	, force_recompile = TRUE
 	, stanc_options = list()
 	, cpp_options = list()
 )
@@ -92,7 +93,8 @@ mod_fast = cmdstanr::cmdstan_model(
 		, values_to = 'mod'
 	)
 	%>% expand_grid(
-		n_A = 2^(1:10)
+		# n_A = 2^(1:10)
+		n_A = 2:16
 		# , n_B = 2^(1:10)
 	)
 	%>% mutate(n_B=n_A)
@@ -157,6 +159,166 @@ mod_fast = cmdstanr::cmdstan_model(
 			all_out <<- bind_rows(all_out,out)
 			print(all_out,n=nrow(all_out))
 			fs::dir_delete('tmp')
+			if(x$n_A>1){
+				(
+					all_out
+					%>% ggplot()
+					+ geom_hline(yintercept=1,linetype=3)
+					+ geom_line(
+						aes(
+							x = n_A
+							, y = `Z0/Z2`
+							, colour = mod_opts
+						)
+					)
+					+ labs(
+						colour = 'Compile\nOptions'
+						, x = 'Problem size\n( kprod([n,n],[n,n]) )'
+						, y = 'Time ratio\n( naive / pre-computed-indices )'
+					)
+				) ->
+					p
+				print(p)
+			}
+			return(out)
+		}
+	)
+) ->
+	all_out
+
+
+# Checking compute efficiency via entirely separate models ----
+
+default_opts = list(
+	stanc_options = list()
+	, cpp_options = list()
+)
+fast_opts = list(
+	stanc_options = list('O1')
+	, cpp_options = list(
+		stan_threads=FALSE
+		, STAN_CPP_OPTIMS=TRUE
+		, STAN_NO_RANGE_CHECKS=TRUE
+		, CXXFLAGS_OPTIM = "-O3 -march=native -mtune=native"
+	)
+)
+
+
+#compiling all models
+(
+	expand_grid(
+		kron = c('naive','indexed','TD')
+		, opt_set = c('default','fast')
+	)
+	%>% group_split(kron,opt_set)
+	# %>% pluck(1) -> x)
+	%>% map(
+		.f = function(x){
+			stan_file = (
+				fs::path('stan',paste0('test_kronecker_efficiency','_',x$kron),ext='stan')
+			)
+			stan_exe_dir = (
+				stan_file
+				%>% fs::path_ext_remove()
+				%>% str_replace('stan','stan_exes')
+				%>% paste0('_',x$opt_set)
+			)
+			fs::dir_create(stan_exe_dir)
+			x$mod = list(
+				cmdstanr::cmdstan_model(
+					stan_file
+					, include_paths = 'stan/includes'
+					, dir = stan_exe_dir
+					, stanc_options = get(paste0(x$opt_set,'_opts'))$stanc_options
+					, cpp_options = get(paste0(x$opt_set,'_opts'))$cpp_options
+				)
+			)
+			return(x)
+		}
+	)
+) ->
+	mod_list
+
+mod_tbl = bind_rows(mod_list)
+
+(
+	mod_tbl
+	%>% expand_grid(
+		# n_A = 2^(1:10)
+		n_A = 17:32
+		# , n_B = 2^(1:10)
+	)
+	%>% mutate(n_B=n_A)
+	%>% arrange(n_A,n_B,kron,opt_set)
+	%>% group_split(n_A,n_B,kron,opt_set)
+	# %>% pluck(1) -> x)
+	# %>% {function(x){
+	# 	all_out <<- NULL
+	# 	return(x)
+	# }}()
+	%>% map_dfr(
+		.f = function(x){
+			fs::dir_create('tmp')
+			# done = FALSE
+			# while(!done){
+			post = x$mod[[1]]$sample(
+				data = list(
+					n_A = x$n_A
+					, n_B = x$n_B
+				)
+				# , chains = 1
+				, chains = parallel::detectCores()/2
+				, parallel_chains = parallel::detectCores()/2
+				, show_messages = FALSE
+				, show_exceptions = FALSE
+				, refresh = 0
+				, diagnostics = NULL
+				, adapt_engaged = FALSE
+				, iter_warmup = 0
+				, iter_sampling = 1e3
+				, output_dir = 'tmp'
+			)
+			# }
+			(
+				post$profiles()
+				%>% bind_rows(.id = 'chain')
+				%>% summarise(
+					value = mean(total_time)
+				)
+				%>% bind_cols(
+					select(x,-mod)
+					, .
+				)
+			) ->
+				out
+			all_out <<- bind_rows(all_out,out)
+			# print(all_out,n=nrow(all_out))
+			fs::dir_delete('tmp')
+			if(x$n_A>2){
+				(
+					all_out
+					%>% pivot_wider(names_from=kron)
+					%>% mutate(
+						value = naive / TD
+					)
+					%>% ggplot()
+					+ geom_hline(yintercept=1,linetype=3)
+					+ geom_line(
+						aes(
+							x = n_A
+							, y = value
+							, colour = opt_set
+						)
+					)
+					+ labs(
+						colour = 'Compile\nOptions'
+						, x = 'Problem size\n( kprod([n,n],[n,n]) )'
+						, y = 'Time ratio\n( naive / pre-computed-indices )'
+					)
+				) ->
+					p
+				print(p)
+			}
 			return(out)
 		}
 	)
