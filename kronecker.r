@@ -6,6 +6,7 @@ stan_exe_dir = fs::path_ext_remove(stan_file) %>% str_replace('stan','stan_exes'
 fs::dir_create(stan_exe_dir)
 mod = cmdstanr::cmdstan_model(
 	stan_file
+	, include_paths = 'stan/includes'
 	, dir = stan_exe_dir
 	# , force_recompile = TRUE
 	, stanc_options = list()
@@ -13,6 +14,7 @@ mod = cmdstanr::cmdstan_model(
 )
 
 # Checking accuracy ----
+fs::dir_create('tmp')
 post = mod$sample(
 	data = list(
 		n_A = 10
@@ -27,9 +29,12 @@ post = mod$sample(
 	, show_exceptions = FALSE
 	, refresh = 0
 	, diagnostics = NULL
+	, output_dir = 'tmp'
 )
 
 draws = posterior::as_draws_rvars(post$draws())
+fs::dir_delete('tmp')
+
 Z0 = mean(draws$Z0)
 Z1 = mean(draws$Z1)
 Z2 = mean(draws$Z2)
@@ -49,6 +54,7 @@ stan_exe_dir_default = fs::path_ext_remove(stan_file) %>% str_replace('stan','st
 fs::dir_create(stan_exe_dir_default)
 mod_default = cmdstanr::cmdstan_model(
 	stan_file
+	, include_paths = 'stan/includes'
 	, dir = stan_exe_dir_default
 	# , force_recompile = TRUE
 	# fast-compute stanc_options:
@@ -56,10 +62,12 @@ mod_default = cmdstanr::cmdstan_model(
 	# fast-compute cpp_options (but not using BLAS/LAPACK)
 	, cpp_options = list()
 )
+
 stan_exe_dir_fast = paste0(stan_exe_dir,'_fast')
 fs::dir_create(stan_exe_dir_fast)
 mod_fast = cmdstanr::cmdstan_model(
 	stan_file
+	, include_paths = 'stan/includes'
 	, dir = stan_exe_dir_fast
 	# , force_recompile = TRUE
 	# fast-compute stanc_options:
@@ -75,23 +83,22 @@ mod_fast = cmdstanr::cmdstan_model(
 
 (
 	tibble(
-		default = list(mod)
-		, fast_opts = list(mod_fast)
+		default = list(mod_default)
+		, fast = list(mod_fast)
 	)
 	%>% pivot_longer(
 		everything()
-		, names_to = 'mod_name'
+		, names_to = 'mod_opts'
 		, values_to = 'mod'
 	)
-
 	%>% expand_grid(
 		n_A = 2^(1:10)
-		# , n_B = 2:10
+		# , n_B = 2^(1:10)
 	)
 	%>% mutate(n_B=n_A)
-	%>% arrange(n_A,n_B,mod_name)
+	%>% arrange(n_A,n_B,mod_opts)
 	# %>% filter(n_A==32)
-	%>% group_split(n_A,n_B,mod_name)
+	%>% group_split(n_A,n_B,mod_opts)
 	# %>% pluck(1) -> x)
 	%>% {function(x){
 		all_out <<- NULL
@@ -100,7 +107,6 @@ mod_fast = cmdstanr::cmdstan_model(
 	%>% map_dfr(
 		.f = function(x){
 			fs::dir_create('tmp')
-			tmpdir = tempdir()
 			# done = FALSE
 			# while(!done){
 				post = x$mod[[1]]$sample(
@@ -108,6 +114,7 @@ mod_fast = cmdstanr::cmdstan_model(
 						n_A = x$n_A
 						, n_B = x$n_B
 					)
+					# , chains = 1
 					, chains = parallel::detectCores()/2
 					, parallel_chains = parallel::detectCores()/2
 					, show_messages = FALSE
@@ -116,7 +123,7 @@ mod_fast = cmdstanr::cmdstan_model(
 					, diagnostics = NULL
 					, adapt_engaged = FALSE
 					, iter_warmup = 0
-					, iter_sampling = 1e2
+					, iter_sampling = 1e3
 					, output_dir = 'tmp'
 				)
 			# }
@@ -126,10 +133,11 @@ mod_fast = cmdstanr::cmdstan_model(
 				%>% select(chain,name,total_time)
 				%>% rename(value=total_time)
 				%>% pivot_wider()
+				%>% select(chain,Z0,Z1,Z2)
 				%>% mutate(
-					ratio_Z0_div_Z1 = Z0/Z1
-					, ratio_Z1_div_Z2 = Z1/Z2
-					, ratio_Z0_div_Z2 = Z0/Z2
+					`Z0/Z1` = Z0/Z1
+					, `Z1/Z2` = Z1/Z2
+					, `Z0/Z2` = Z0/Z2
 					, .before = everything()
 				)
 				%>% summarise(
@@ -139,7 +147,7 @@ mod_fast = cmdstanr::cmdstan_model(
 					)
 				)
 				%>% mutate(
-					mod_name = x$mod_name
+					mod_opts = x$mod_opts
 					, n_A = x$n_A
 					, n_B = x$n_B
 					, .before = everything()
@@ -147,7 +155,7 @@ mod_fast = cmdstanr::cmdstan_model(
 			) ->
 				out
 			all_out <<- bind_rows(all_out,out)
-			print(all_out)
+			print(all_out,n=nrow(all_out))
 			fs::dir_delete('tmp')
 			return(out)
 		}
