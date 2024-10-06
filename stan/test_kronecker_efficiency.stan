@@ -1,6 +1,6 @@
 #include functions.stan
 #include base.stan
 model{
-	#include kronecker.stan
-	#include target.stan
+	#include kronecker_all.stan
+	#include target_all.stan
 }
